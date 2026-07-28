@@ -7,8 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sync"
-	"time"
 
+	"github.com/Tharun-bot/taksuMCP/internal/clock"
 	"github.com/Tharun-bot/taksuMCP/internal/taskstate"
 	"github.com/Tharun-bot/taksuMCP/internal/taskstore"
 )
@@ -21,21 +21,25 @@ type Store struct {
 	// TaskID it produced, so repeated Create calls with the same key
 	// return the same task instead of creating a duplicate.
 	idempotency map[string]string
-	now         func() time.Time // overridable for tests
+	clock       clock.Clock
 }
 
-// New returns an empty in-memory store.
+// New returns an empty in-memory store using the real system clock.
 func New() *Store {
+	return NewWithClock(clock.Real{})
+}
+
+// NewWithClock returns an empty in-memory store using the given
+// clock. Used in tests (e.g. by the reaper's fake-clock tests) to
+// control time deterministically.
+func NewWithClock(c clock.Clock) *Store {
 	return &Store{
 		byID:        make(map[string]taskstore.Task),
 		idempotency: make(map[string]string),
-		now:         time.Now,
+		clock:       c,
 	}
 }
 
-// deriveTaskID computes a deterministic ID from the idempotency key.
-// Using a hash (not uuid.New()) is what makes Create idempotent: the
-// same key always maps to the same ID without needing a lookup first.
 func deriveTaskID(idempotencyKey string) string {
 	sum := sha256.Sum256([]byte(idempotencyKey))
 	return hex.EncodeToString(sum[:])
@@ -50,7 +54,7 @@ func (s *Store) Create(_ context.Context, params taskstore.CreateParams) (taskst
 	}
 
 	taskID := deriveTaskID(params.IdempotencyKey)
-	now := s.now()
+	now := s.clock.Now()
 	task := taskstore.Task{
 		TaskID:         taskID,
 		Status:         taskstate.StateWorking,
@@ -87,11 +91,11 @@ func (s *Store) UpdateState(_ context.Context, taskID string, event taskstate.Ev
 
 	next, err := taskstate.Transition(task.Status, event)
 	if err != nil {
-		return taskstore.Task{}, err // wraps taskstore.ErrInvalidTransition
+		return taskstore.Task{}, err
 	}
 
 	task.Status = next
-	task.LastUpdatedAt = s.now()
+	task.LastUpdatedAt = s.clock.Now()
 	if payload.StatusMessage != "" {
 		task.StatusMessage = payload.StatusMessage
 	}
@@ -129,19 +133,37 @@ func (s *Store) Cancel(_ context.Context, taskID string) error {
 		return taskstore.ErrNotFound
 	}
 	if task.Status.IsTerminal() {
-		// Cooperative + already-terminal: acking is still correct
-		// per spec (cancel may arrive after completion). Not an error.
 		return nil
 	}
 
 	next, err := taskstate.Transition(task.Status, taskstate.EventCancelled)
 	if err != nil {
-		// Server is allowed to decline; ack without changing state.
 		return nil
 	}
 	task.Status = next
-	task.LastUpdatedAt = s.now()
+	task.LastUpdatedAt = s.clock.Now()
 	s.byID[taskID] = task
+	return nil
+}
+
+func (s *Store) Delete(_ context.Context, taskID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.byID[taskID]; !ok {
+		return taskstore.ErrNotFound
+	}
+	delete(s.byID, taskID)
+
+	// Clean up the idempotency mapping too, so a repeated Create with
+	// the same key after deletion produces a fresh task rather than
+	// silently resurrecting a stale one.
+	for k, v := range s.idempotency {
+		if v == taskID {
+			delete(s.idempotency, k)
+			break
+		}
+	}
 	return nil
 }
 

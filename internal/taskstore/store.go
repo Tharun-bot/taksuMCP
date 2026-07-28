@@ -85,6 +85,12 @@ type TaskStore interface {
 	// to cancelled; Cancel itself just must not error for a valid,
 	// non-terminal taskID.
 	Cancel(ctx context.Context, taskID string) error
+
+	// Delete permanently removes a task record. Used by the TTL
+	// reaper (internal/reaper) to purge expired tasks. Not exposed
+	// over the wire protocol — deletion is a server housekeeping
+	// concern, not part of the MCP Tasks spec surface.
+	Delete(ctx context.Context, taskID string) error
 }
 
 // StatePayload carries the data attached to a state transition. Only
