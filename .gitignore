@@ -1,0 +1,28 @@
+# Binaries
+/bin/
+/dist/
+taksumcp
+taksumcp.exe
+
+# Data
+/data/
+*.db
+*.db-journal
+*.sqlite
+
+# Env
+.env
+.env.local
+
+# Go
+*.test
+*.out
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
